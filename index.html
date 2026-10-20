@@ -3950,10 +3950,164 @@
         ta.remove();
       }
 
+      // ================= MODUL CLOUD SYNC OTOMATIS (FIREBASE REALTIME DB) =================
+      const CLOUD_CONFIG_KEY = 'si_opslap_cloud_db_url_v1';
+      // Opsional: Anda juga bisa langsung menempelkan link Firebase di antara tanda kutip di bawah ini
+      // agar perangkat baru otomatis terhubung tanpa perlu mengisi form pop-up sama sekali:
+      const DEFAULT_FIREBASE_URL = 'https://opslapnindyakarya-default-rtdb.asia-southeast1.firebasedatabase.app/'; 
+
+      let cloudSyncTimer = null;
+      let isApplyingCloudData = false;
+      let lastCloudHash = '';
+
+      function getCloudDbUrl() {
+        let url = DEFAULT_FIREBASE_URL || localStorage.getItem(CLOUD_CONFIG_KEY) || '';
+        url = url.trim().replace(/\/+$/, '');
+        return url;
+      }
+
+      function setCloudBadgeStatus(statusText, color = 'emerald') {
+        const btn = document.getElementById('btn-cloud-sync-config');
+        if (!btn) return;
+        const colors = {
+          emerald: 'bg-emerald-600/20 text-emerald-300 border-emerald-500/40',
+          amber: 'bg-amber-500/20 text-amber-300 border-amber-500/40',
+          rose: 'bg-rose-500/20 text-rose-300 border-rose-500/40',
+          slate: 'bg-slate-800 text-slate-300 border-slate-700'
+        };
+        btn.className = `inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold border transition ${colors[color] || colors.slate}`;
+        btn.innerHTML = `<span>☁️ ${statusText}</span>`;
+      }
+
+      // Mengirim data terbaru ke Cloud setiap kali ada perubahan (Auto-Push)
+      async function pushStateToCloud() {
+        const dbUrl = getCloudDbUrl();
+        if (!dbUrl || isApplyingCloudData) return;
+
+        try {
+          setCloudBadgeStatus('Menyimpan ke Cloud...', 'amber');
+          const payload = {
+            updatedAt: Date.now(),
+            appState: appState
+          };
+          const res = await fetch(`${dbUrl}/si_opslap_state.json`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          lastCloudHash = JSON.stringify(appState);
+          const timeStr = new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
+          setCloudBadgeStatus(`Cloud Sinkron (${timeStr})`, 'emerald');
+        } catch (err) {
+          setCloudBadgeStatus('Gagal Sinkron Cloud', 'rose');
+        }
+      }
+
+      // Mengambil data terbaru dari Cloud saat web dibuka atau disinkronkan (Auto-Pull)
+      async function pullStateFromCloud(showNotification = false) {
+        const dbUrl = getCloudDbUrl();
+        if (!dbUrl) {
+          setCloudBadgeStatus('Hubungkan Cloud', 'slate');
+          return;
+        }
+
+        try {
+          const res = await fetch(`${dbUrl}/si_opslap_state.json?t=${Date.now()}`);
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          const data = await res.json();
+
+          if (data && data.appState && Array.isArray(data.appState.periods)) {
+            const incomingHash = JSON.stringify(data.appState);
+            if (incomingHash !== lastCloudHash) {
+              // Hindari mereset ketikan jika pengguna sedang fokus mengetik di dalam input
+              const activeTag = document.activeElement ? document.activeElement.tagName : '';
+              if (activeTag === 'INPUT' || activeTag === 'TEXTAREA' || activeTag === 'SELECT') {
+                return;
+              }
+              isApplyingCloudData = true;
+              appState = data.appState;
+              lastCloudHash = incomingHash;
+              localStorage.setItem(STORAGE_KEY, incomingHash);
+              renderAll();
+              isApplyingCloudData = false;
+              if (showNotification) {
+                showToast('Data terbaru berhasil dimuat dari Cloud Database!');
+              }
+            }
+            const timeStr = new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
+            setCloudBadgeStatus(`Cloud Sinkron (${timeStr})`, 'emerald');
+          } else {
+            // Jika database Cloud masih kosong, unggah data lokal saat ini ke Cloud
+            await pushStateToCloud();
+          }
+        } catch (err) {
+          setCloudBadgeStatus('Cloud Offline / Cek URL', 'rose');
+        }
+      }
+
+      // Menyuntikkan Tombol Cloud Sync ke Header & Membajak fungsi saveState() agar otomatis kirim ke Cloud
+      function initCloudSyncFeature() {
+        const headerBtnGroup = document.getElementById('btn-header-save-html')?.parentElement;
+        if (headerBtnGroup) {
+          const cloudBtn = document.createElement('button');
+          cloudBtn.id = 'btn-cloud-sync-config';
+          cloudBtn.type = 'button';
+          cloudBtn.title = 'Pengaturan Database Online (Firebase Cloud Sync)';
+          headerBtnGroup.insertBefore(cloudBtn, headerBtnGroup.firstChild);
+
+          cloudBtn.addEventListener('click', () => {
+            const currentUrl = getCloudDbUrl();
+            const inputUrl = prompt(
+              'Masukkan URL Google Firebase Realtime Database Anda\n(Contoh: https://nama-proyek-default-rtdb.asia-southeast1.firebasedatabase.app):\n\nKosongkan jika ingin mematikan Cloud Sync.',
+              currentUrl
+            );
+            if (inputUrl === null) return;
+            const cleanUrl = inputUrl.trim().replace(/\/+$/, '');
+            if (cleanUrl) {
+              localStorage.setItem(CLOUD_CONFIG_KEY, cleanUrl);
+              showToast('Menghubungkan ke Cloud Database...');
+              pullStateFromCloud(true);
+            } else {
+              localStorage.removeItem(CLOUD_CONFIG_KEY);
+              setCloudBadgeStatus('Hubungkan Cloud', 'slate');
+              showToast('Cloud Sync dinonaktifkan', 'info');
+            }
+          });
+        }
+
+        // Hubungkan otomatis setiap kali saveState dipanggil oleh aplikasi
+        const originalSaveState = saveState;
+        saveState = function () {
+          originalSaveState();
+          if (getCloudDbUrl() && !isApplyingCloudData) {
+            clearTimeout(cloudSyncTimer);
+            cloudSyncTimer = setTimeout(() => {
+              pushStateToCloud();
+            }, 600);
+          }
+        };
+
+        // Tarik data terbaru saat halaman pertama kali dibuka
+        if (getCloudDbUrl()) {
+          pullStateFromCloud(true);
+        } else {
+          setCloudBadgeStatus('Hubungkan Cloud', 'slate');
+        }
+
+        // Cek pembaruan dari perangkat lain secara berkala setiap 8 detik
+        setInterval(() => {
+          if (getCloudDbUrl() && !document.hidden) {
+            pullStateFromCloud(false);
+          }
+        }, 8000);
+      }
+
       // Initialize App
       initEvents();
       updateStorageStatusIndicator();
       switchTab(currentTab);
+      initCloudSyncFeature();
     })();
   </script>
 </body>
